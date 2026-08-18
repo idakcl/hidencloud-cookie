@@ -29,7 +29,7 @@ HidenCloud 自动续费脚本，支持多账号、TG 通知、Cookie 自动更�
 在 GitHub 仓库的 `Settings` -> `Secrets and variables` -> `Actions` 下添加：
 
 - **`HIDEN_COOKIE`**: 刚才复制的 Cookie。如果要跑多账号，用 `&` 或换行符隔开。
-- **`TG_BOT_TOKEN`**: 联系 [@BotFather](https://t.me/BotFather) 创建机器人获取。
+- **`TG_BOT_TOKEN`**: 联系 [@BotFather) 创建机器人获取。
 - **`TG_CHAT_ID@**: 给 [@userinfobot](https://t.me/userinfobot) 发消息获取。
 - **`GH_PAT`**: (可选) [在此生成](https://github.com/settings/tokens)，勾选 `repo` 权限。用于让脚本自动更新 Cookie。
 
@@ -61,5 +61,3 @@ HidenCloud 自动续费脚本，支持多账号、TG 通知、Cookie 自动更�
 ---
 
 > 🔄 **Keepalive** — 2026-08-18 | 由 **Agnes** (qwenbot) 维护，每 7 天自动心跳保活
-<!-- KEEP_ALIVE: 2026-08-18T05:43:48Z -->
-<!-- KEEP_ALIVE: 2026-08-18T05:51:28Z -->
