@@ -1,0 +1,16 @@
+{
+    "accounts": [
+        {
+            "username": "第一个账号说明",
+            "cookie_str": "在这里填入抓取到的原始 Cookie 字符串"
+        },
+        {
+            "username": "第二个账号说明",
+            "cookie_str": "账号2的 Cookie..."
+        }
+    ],
+    "telegram": {
+        "bot_token": "123456:ABC...",
+        "chat_id": "987654321"
+    }
+}
