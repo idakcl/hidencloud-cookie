@@ -134,8 +134,15 @@ def export_cookie_str(driver):
 
 # ============ Cloudflare 挑战处理 ============
 def is_cf_challenge(driver):
+    """只用 title / URL 判定，避免把内嵌 CF 脚本的正常页面误判为挑战页。"""
     try:
-        return "Just a moment" in driver.title or "/cdn-cgi/challenge-platform" in driver.page_source
+        t = (driver.title or "")
+        u = driver.current_url or ""
+        if "Just a moment" in t or "Attention Required" in t:
+            return True
+        if "Security Verification" in t and "/dashboard" not in u and "/service" not in u:
+            return True
+        return False
     except Exception:
         return False
 
