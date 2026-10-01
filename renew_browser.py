@@ -257,11 +257,12 @@ def get_account_info(driver):
             var bl = document.querySelector('a[href*="/balance"]');
             if (bl) {
                 var b = bl.querySelector('.font-extrabold, .text-3xl, h4, dt, div');
-                info.balance = b ? b.textContent.replace(/\\s+/g,' ').trim() : '';
+                var mm = (b ? b.textContent : '').match(/[¥€$]\\s?\\d+(?:[.,]\\d{1,2})?/);
+                info.balance = mm ? mm[0].replace(/\\s+/g, '') : '';
             }
             if (!info.balance) {
                 var bm = document.body.innerText.match(/[¥€$]\\s?\\d+\\.\\d{2}/);
-                info.balance = bm ? bm[0] : '';
+                info.balance = bm ? bm[0].replace(/\\s+/g, '') : '';
             }
             return info;
         """) or {}
@@ -350,13 +351,18 @@ def renew_one(driver, sid):
     """)
     if "Renewal Restricted" in (restriction or ""):
         detail = driver.execute_script("""
-            var e=document.querySelector('.fixed.inset-0 p');return e?e.textContent.trim():'';
+            var e=document.querySelector('.fixed.inset-0 p');return e?e.textContent.replace(/\\s+/g,' ').trim():'';
         """) or ""
         try:
             driver.execute_script("var b=Array.from(document.querySelectorAll('button')).find(function(x){return /ok|close/i.test(x.textContent);});if(b)b.click();")
         except Exception:
             pass
-        msg = f"未到续期时间 (站点提示: {detail[:70]})" if detail else "未到续期时间 (站点提示 Renewal Restricted)"
+        # 从站点提示中提取剩余天数，展示更直观
+        dm = re.search(r"expires in\s+(\d+)\s+day", detail, re.I)
+        if dm:
+            msg = f"还剩 {dm.group(1)} 天到期，需 <1 天才可续"
+        else:
+            msg = f"站点提示: {detail[:120]}" if detail else "站点提示 Renewal Restricted"
         return "skip", msg, take_shot(driver, f"{sid}-restricted")
 
     # 续期容器：模态框 #renewService-{sid} 或内联表单 #renew-form-{sid}
