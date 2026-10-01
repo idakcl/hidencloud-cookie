@@ -108,11 +108,11 @@ def dav_config():
 
 
 def dav_download():
-    """取云端最新 cookie；任何异常/未配置都返回空串，不影响主流程。"""
+    """取云端最新 cookie，返回 (cookie, 说明)；任何异常/未配置都返回 ("", 原因)。"""
     cfg = dav_config()
     if not cfg:
         logger.info("未配置 WEBDAV_URL/USER/PASS，跳过云端读取")
-        return ""
+        return "", "未配置"
     full, user, pwd = cfg[0] + DAV_FILE, cfg[1], cfg[2]
     try:
         r = requests.get(full, auth=(user, pwd), timeout=DAV_TIMEOUT)
@@ -120,16 +120,20 @@ def dav_download():
             data = r.json()
             ck = (data.get("cookie") or "").strip()
             if ck:
-                logger.info(f"☁️ 云端 cookie 已获取 (更新于 {data.get('updated_at', '未知')})")
-                return ck
+                upd = data.get("updated_at", "未知")
+                logger.info(f"☁️ 云端 cookie 已获取 (更新于 {upd})")
+                return ck, f"更新于 {upd}"
             logger.warning("☁️ 云端文件无 cookie 字段")
+            return "", "云端文件无 cookie"
         elif r.status_code == 404:
             logger.info("☁️ 云端暂无 cookie 文件（首次运行）")
+            return "", "云端无文件"
         else:
             logger.warning(f"☁️ 云端下载失败，状态码 {r.status_code}")
+            return "", f"云端 HTTP {r.status_code}"
     except Exception as e:
         logger.warning(f"☁️ 云端下载异常: {e}")
-    return ""
+        return "", "云端读取异常"
 
 
 def dav_upload(new_cookie):
@@ -333,7 +337,7 @@ def get_account_info(driver):
 
 
 # ============ 汇总报告 ============
-def build_report(acct, counts, lines):
+def build_report(acct, counts, lines, cookie_src="", login_via=None):
     total = counts.get("ok", 0) + counts.get("skip", 0) + counts.get("fail", 0)
     try:
         attempt = int(os.environ.get("RENEW_ATTEMPT") or 0) + 1
@@ -347,6 +351,10 @@ def build_report(acct, counts, lines):
     head += f"👤 账号: {who}\n"
     head += f"💰 余额: {md(acct.get('balance') or '未知')}\n"
     head += f"🕒 时间: {bj_time()} (UTC+8)\n"
+    if cookie_src:
+        head += f"🍪 Cookie 来源: {md(cookie_src)}\n"
+    if login_via:
+        head += f"🔑 实际登录: {md(login_via)}\n"
     if attempt > 1:
         head += f"🔁 第 {attempt - 1}/10 次重试\n"
     head += "━━━━━━━━━━━━━━━━━━\n"
@@ -526,7 +534,13 @@ def main():
     secret_cookie = os.environ.get("HIDEN_COOKIE", "").strip()
     creds = os.environ.get("HIDENCLOUD", "").strip()  # 可选: email-----password
     # 云端优先：WebDAV 里是上次运行刷新的最新 cookie，Secret 只作种子/兜底
-    cookie = dav_download() or secret_cookie
+    cloud_cookie, cloud_note = dav_download()
+    if cloud_cookie:
+        cookie, cookie_src = cloud_cookie, f"☁️ InfiniCloud 云端 ({cloud_note})"
+    elif secret_cookie:
+        cookie, cookie_src = secret_cookie, f"🔒 GitHub Secret HIDEN_COOKIE (云端: {cloud_note})"
+    else:
+        cookie, cookie_src = "", f"无 (云端: {cloud_note} / Secret 为空)"
     if not cookie and not creds:
         logger.error("未提供 HIDEN_COOKIE 或 HIDENCLOUD")
         send_tg("❌ HidenCloud 续期失败: 缺少 HIDEN_COOKIE / HIDENCLOUD")
@@ -540,6 +554,7 @@ def main():
     shots = []
     counts = {"ok": 0, "skip": 0, "fail": 0}
     acct = {}
+    login_via = "Cookie 直接登录" if cookie else "无 Cookie"
 
     try:
         if cookie:
@@ -551,6 +566,7 @@ def main():
 
         # 若落到登录页且有账号密码，则走密码登录
         if "/auth/login" in driver.current_url or driver.is_element_visible("input#password"):
+            login_via = "账号密码登录 (Cookie 失效)"
             if not creds or "-----" not in creds:
                 raise RuntimeError("Cookie 已失效且未配置 HIDENCLOUD 账号密码")
             email, pwd = creds.split("-----", 1)
@@ -606,7 +622,7 @@ def main():
             dav_upload(new_cookie)
         driver.quit()
 
-    report = build_report(acct, counts, lines)
+    report = build_report(acct, counts, lines, cookie_src, login_via)
     send_tg(report, photo=(shots[-1] if shots else None))
     logger.info("结果:\n" + report)
     sys.exit(0 if ok_all else 1)
