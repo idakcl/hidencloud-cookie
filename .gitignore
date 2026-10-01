@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+browser_state/
+screenshots/
+config.json
+.env.local
