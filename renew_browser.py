@@ -30,6 +30,33 @@ logger = logging.getLogger("hiden-browser")
 
 BASE_URL = "https://dash.hidencloud.com"
 PROFILE_DIR = os.path.abspath("browser_state")
+SHOT_DIR = "screenshots"
+
+STATUS_ICON = {"ok": "✅", "skip": "ℹ️", "fail": "❌"}
+STATUS_TEXT = {"ok": "续期成功", "skip": "未到续期时间", "fail": "续期失败"}
+
+
+def md(s):
+    """Telegram Markdown 旧版会吞掉 _ * ` [ 等字符，账号/日期需转义"""
+    return re.sub(r"([_*\[\]`])", r"\\\1", s or "")
+
+
+def bj_time():
+    """北京时间字符串 (UTC+8)，不依赖运行环境时区"""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + 8 * 3600))
+
+
+def take_shot(driver, name):
+    """截图并返回路径，失败返回 None"""
+    try:
+        os.makedirs(SHOT_DIR, exist_ok=True)
+        path = os.path.join(SHOT_DIR, f"{time.strftime('%H%M%S')}-{name}.png")
+        driver.save_screenshot(path)
+        logger.info(f"📸 {path}")
+        return path
+    except Exception as e:
+        logger.warning(f"截图失败 ({name}): {e}")
+        return None
 
 
 # ============ GitHub Secret 自动刷新 ============
@@ -204,6 +231,63 @@ def get_service_ids(driver):
     return out
 
 
+# ============ 账号信息（用户名/邮箱/余额） ============
+def get_account_info(driver):
+    try:
+        return driver.execute_script("""
+            function txt(sel){var e=document.querySelector(sel);return e?e.textContent.replace(/\\s+/g,' ').trim():'';}
+            var info = {name:'', email:'', balance:''};
+            info.email = txt('p.font-light.text-gray-500');
+            if (!/@/.test(info.email)) {
+                var m = document.body.innerText.match(/[\\w.+-]+@[\\w-]+\\.[\\w.]+/);
+                info.email = m ? m[0] : '';
+            }
+            // 用户名取邮箱所在卡片内的标题，避免抓到页面其它 h3
+            var ep = document.querySelector('p.font-light.text-gray-500');
+            if (ep) {
+                var card = ep.closest('div') || ep.parentElement;
+                for (var i = 0; i < 4 && card; i++) {
+                    var h = card.querySelector('h3, h4, .font-bold, .text-lg');
+                    if (h && h.textContent.trim() && h !== ep) { info.name = h.textContent.replace(/\\s+/g,' ').trim(); break; }
+                    card = card.parentElement;
+                }
+            }
+            var link = document.querySelector('h3 > a[href="#"]');
+            if (!info.name && link) info.name = link.textContent.replace(/\\s+/g,' ').trim();
+            var bl = document.querySelector('a[href*="/balance"]');
+            if (bl) {
+                var b = bl.querySelector('.font-extrabold, .text-3xl, h4, dt, div');
+                info.balance = b ? b.textContent.replace(/\\s+/g,' ').trim() : '';
+            }
+            if (!info.balance) {
+                var bm = document.body.innerText.match(/[¥€$]\\s?\\d+\\.\\d{2}/);
+                info.balance = bm ? bm[0] : '';
+            }
+            return info;
+        """) or {}
+    except Exception as e:
+        logger.warning(f"读取账号信息失败: {e}")
+        return {}
+
+
+# ============ 汇总报告 ============
+def build_report(acct, counts, lines):
+    total = counts.get("ok", 0) + counts.get("skip", 0) + counts.get("fail", 0)
+    head = "☁️ *HidenCloud 自动续费任务*\n"
+    head += "━━━━━━━━━━━━━━━━━━\n"
+    who = md(acct.get("name") or "未知")
+    if acct.get("email"):
+        who += f" ({md(acct['email'])})"
+    head += f"👤 账号: {who}\n"
+    head += f"💰 余额: {md(acct.get('balance') or '未知')}\n"
+    head += f"🕒 时间: {bj_time()} (UTC+8)\n"
+    head += "━━━━━━━━━━━━━━━━━━\n"
+    head += (f"📊 执行统计: 成功 {counts.get('ok',0)} | "
+             f"未到 {counts.get('skip',0)} | 失败 {counts.get('fail',0)} | 共 {total}\n\n")
+    body = "\n".join(lines) if lines else "（无服务）"
+    return f"{head}{body}\n━━━━━━━━━━━━━━━━━━\n🤖 GitHub Actions 自动执行"
+
+
 # ============ 页面结构 dump（排查用，只含名称/文本，不含 token） ============
 def dump_renew_ui(driver, sid):
     try:
@@ -230,12 +314,15 @@ def dump_renew_ui(driver, sid):
 
 # ============ 单个服务续期 ============
 def renew_one(driver, sid):
-    """返回 (ok: bool, msg: str)。以「到期时间是否变晚」为准。"""
+    """返回 (status, msg, shot)。status: ok=续期成功 / skip=未到续期时间 / fail=失败。
+
+    以「到期时间是否变晚」为唯一硬判据，杜绝假绿。
+    """
     manage_url = f"{BASE_URL}/service/{sid}/manage"
     driver.get(manage_url)
     time.sleep(3)
     if not wait_pass_cf(driver):
-        return False, "CF 挑战未通过"
+        return "fail", "CF 挑战未通过", take_shot(driver, f"{sid}-cf-blocked")
 
     before_raw, before_std = get_due_date(driver)
 
@@ -253,20 +340,24 @@ def renew_one(driver, sid):
 
     if not clicked:
         dump_renew_ui(driver, sid)
-        return False, "未找到 Renew 按钮 (已 dump 结构)"
+        return "fail", "未找到 Renew 按钮 (已 dump 结构)", take_shot(driver, f"{sid}-no-renew-btn")
     logger.info(f"点击续期触发按钮: {clicked!r}")
     time.sleep(2)
 
-    # 解析限制参数（若未到期，站点会弹窗限制）
+    # 站点限制弹窗 = 未到续期时间
     restriction = driver.execute_script("""
         var e=document.querySelector('.fixed.inset-0 h3');return e?e.textContent.trim():'';
     """)
     if "Renewal Restricted" in (restriction or ""):
+        detail = driver.execute_script("""
+            var e=document.querySelector('.fixed.inset-0 p');return e?e.textContent.trim():'';
+        """) or ""
         try:
             driver.execute_script("var b=Array.from(document.querySelectorAll('button')).find(function(x){return /ok|close/i.test(x.textContent);});if(b)b.click();")
         except Exception:
             pass
-        return True, "未到期 (站点限制弹窗, 视为正常)"
+        msg = f"未到续期时间 (站点提示: {detail[:70]})" if detail else "未到续期时间 (站点提示 Renewal Restricted)"
+        return "skip", msg, take_shot(driver, f"{sid}-restricted")
 
     # 续期容器：模态框 #renewService-{sid} 或内联表单 #renew-form-{sid}
     container = None
@@ -278,13 +369,12 @@ def renew_one(driver, sid):
         except Exception:
             continue
     if not container:
-        # 可能需要等待模态框出现
         try:
             driver.wait_for_element_visible(f"#renewService-{sid}", timeout=10)
             container = f"#renewService-{sid}"
         except Exception:
             dump_renew_ui(driver, sid)
-            return False, "点击后未出现续期表单/模态框 (已 dump)"
+            return "fail", "点击后未出现续期表单/模态框 (已 dump)", take_shot(driver, f"{sid}-no-modal")
 
     # 容器内若有 Turnstile，尝试交互并等待 token（拿不到也继续，交给浏览器/最终比对判定）
     if driver.is_element_present(f"{container} .cf-turnstile") or driver.is_element_present(".cf-turnstile"):
@@ -300,37 +390,39 @@ def renew_one(driver, sid):
     """, container)
     if not submitted:
         dump_renew_ui(driver, sid)
-        return False, "容器内未找到提交按钮 (已 dump)"
+        return "fail", "容器内未找到提交按钮 (已 dump)", take_shot(driver, f"{sid}-no-submit")
     logger.info(f"提交续期表单: {submitted!r}")
     time.sleep(4)
     if not wait_pass_cf(driver):
-        return False, "创建账单后 CF 挑战未通过"
+        return "fail", "创建账单后 CF 挑战未通过", take_shot(driver, f"{sid}-cf-after-submit")
 
     # 支付：若有 Pay 按钮则点击（免费服务通常无）
     try:
-        clicked = driver.execute_script(
+        paid = driver.execute_script(
             "var b=document.querySelector('button[type=submit]');"
             "if(b&&b.innerText.toLowerCase().includes('pay')){b.click();return true;}return false;"
         )
-        if clicked:
+        if paid:
+            logger.info("点击 Pay 完成支付")
             time.sleep(5)
             wait_pass_cf(driver, timeout=40)
     except Exception:
         pass
 
-    # 复核到期时间
+    # 复核到期时间（唯一硬判据）
     driver.get(manage_url)
     time.sleep(3)
     wait_pass_cf(driver, timeout=40)
     after_raw, after_std = get_due_date(driver)
+    shot = take_shot(driver, f"{sid}-result")
 
     if before_std and after_std:
         if after_std > before_std:
-            return True, f"续期成功 ({before_raw} → {after_raw})"
-        return False, f"到期时间未变 ({after_raw})"
+            return "ok", f"到期 {before_raw} → {after_raw}", shot
+        return "fail", f"到期时间未变 (仍为 {after_raw})", shot
     if after_std and not before_std:
-        return True, f"续期成功 (到期 {after_raw})"
-    return False, "无法确认到期时间"
+        return "ok", f"到期 {after_raw}", shot
+    return "fail", "无法确认到期时间", shot
 
 
 def wait_renew_token(driver, sid, timeout=60):
@@ -370,6 +462,9 @@ def main():
     driver.set_page_load_timeout(60)
     ok_all = True
     lines = []
+    shots = []
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    acct = {}
 
     try:
         if cookie:
@@ -410,21 +505,24 @@ def main():
         if not sids:
             raise RuntimeError("登录后未找到任何服务")
         logger.info(f"发现服务: {sids}")
+        acct = get_account_info(driver)
 
         for sid in sids:
-            ok, msg = renew_one(driver, sid)
-            lines.append(f"{'✅' if ok else '❌'} 服务 {sid}: {msg}")
-            if not ok:
+            status, msg, shot = renew_one(driver, sid)
+            if shot:
+                shots.append(shot)
+            lines.append(f"{STATUS_ICON[status]} 服务 {sid} · {STATUS_TEXT[status]}\n   └ {md(msg)}")
+            counts[status] = counts.get(status, 0) + 1
+            if status == "fail":
                 ok_all = False
 
     except Exception as e:
         ok_all = False
-        lines.append(f"❌ 异常: {e}")
-        try:
-            os.makedirs("screenshots", exist_ok=True)
-            driver.save_screenshot("screenshots/fail.png")
-        except Exception:
-            pass
+        counts["fail"] = counts.get("fail", 0) + 1
+        lines.append(f"❌ 异常\n   └ {md(str(e))}")
+        s = take_shot(driver, "critical-error")
+        if s:
+            shots.append(s)
     finally:
         # 导出最新 cookie 写回 Secret，保持登录态新鲜
         new_cookie = export_cookie_str(driver)
@@ -432,9 +530,8 @@ def main():
             update_github_secret(new_cookie)
         driver.quit()
 
-    report = "📊 *HidenCloud 浏览器续期*\n\n" + "\n".join(lines)
-    photo = "screenshots/fail.png" if not ok_all and os.path.exists("screenshots/fail.png") else None
-    send_tg(report, photo=photo)
+    report = build_report(acct, counts, lines)
+    send_tg(report, photo=(shots[-1] if shots else None))
     logger.info("结果:\n" + report)
     sys.exit(0 if ok_all else 1)
 
