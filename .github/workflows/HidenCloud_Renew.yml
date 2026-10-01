@@ -2,14 +2,23 @@ name: HidenCloud Auto Renew
 
 on:
   schedule:
-    # 每天北京时间早上 9 点运行 (UTC 1:00)
-    - cron: '0 1 * * *'
-  workflow_dispatch: # 允许手动运行
+    # 每小时触发；门禁保证「每天 1 次正常执行 + 失败后每小时补跑，最多 10 次重试」
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '忽略门禁强制执行 (true/false)'
+        required: false
+        default: 'false'
 
-# 防止多个任务同时运行导致更新 Secret 冲突
+# 不取消进行中的任务，避免补跑把正在执行的续期打断
 concurrency:
   group: hidencloud-renew
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   renew:
@@ -23,25 +32,63 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Retry Gate
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          FORCE: ${{ github.event.inputs.force }}
+          WORKFLOW_FILE: HidenCloud_Renew.yml
+        run: python check_retry.py
+
       - name: Install Dependencies
-        run: |
-          pip install --quiet seleniumbase pynacl
+        if: steps.gate.outputs.should_run == 'true'
+        run: pip install --quiet seleniumbase pynacl
 
       - name: Run Browser Renew
+        if: steps.gate.outputs.should_run == 'true'
         env:
           HIDEN_COOKIE: ${{ secrets.HIDEN_COOKIE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          RENEW_ATTEMPT: ${{ steps.gate.outputs.attempts }}
         run: |
           python renew_browser.py
+
+      - name: Notify Giveup
+        if: steps.gate.outputs.reason == 'giveup'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os, json, urllib.request, datetime
+          t, c = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
+          if not t or not c:
+              print("未配置 TG，跳过"); raise SystemExit(0)
+          now = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+          msg = ("⚠️ *HidenCloud 续期放弃*\n"
+                 "━━━━━━━━━━━━━━━━━━\n"
+                 "今日已重试 10 次仍未成功，明天 09:00 重新计时。\n"
+                 "请检查服务是否已到期、Cookie 是否失效。\n"
+                 f"🕒 {now} (UTC+8)\n"
+                 "━━━━━━━━━━━━━━━━━━\n"
+                 "🤖 GitHub Actions 自动执行")
+          data = json.dumps({"chat_id": c, "text": msg, "parse_mode": "Markdown"}).encode()
+          req = urllib.request.Request(f"https://api.telegram.org/bot{t}/sendMessage",
+                                       data=data, headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(req, timeout=15) as r:
+              print("TG:", r.status)
+          PY
 
       - name: Upload Screenshots (Debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: renew-screenshots
+          name: renew-screenshots-${{ github.run_number }}
           path: screenshots/*.png
           if-no-files-found: ignore
           retention-days: 3

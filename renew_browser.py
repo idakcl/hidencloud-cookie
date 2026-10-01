@@ -274,6 +274,10 @@ def get_account_info(driver):
 # ============ 汇总报告 ============
 def build_report(acct, counts, lines):
     total = counts.get("ok", 0) + counts.get("skip", 0) + counts.get("fail", 0)
+    try:
+        attempt = int(os.environ.get("RENEW_ATTEMPT") or 0) + 1
+    except ValueError:
+        attempt = 1
     head = "☁️ *HidenCloud 自动续费任务*\n"
     head += "━━━━━━━━━━━━━━━━━━\n"
     who = md(acct.get("name") or "未知")
@@ -282,6 +286,8 @@ def build_report(acct, counts, lines):
     head += f"👤 账号: {who}\n"
     head += f"💰 余额: {md(acct.get('balance') or '未知')}\n"
     head += f"🕒 时间: {bj_time()} (UTC+8)\n"
+    if attempt > 1:
+        head += f"🔁 第 {attempt - 1}/10 次重试\n"
     head += "━━━━━━━━━━━━━━━━━━\n"
     head += (f"📊 执行统计: 成功 {counts.get('ok',0)} | "
              f"未到 {counts.get('skip',0)} | 失败 {counts.get('fail',0)} | 共 {total}\n\n")
