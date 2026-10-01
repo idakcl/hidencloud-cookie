@@ -25,9 +25,9 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install curl_cffi beautifulsoup4 pynacl
+          pip install --quiet seleniumbase pynacl
 
-      - name: Run Renew Script
+      - name: Run Browser Renew
         env:
           HIDEN_COOKIE: ${{ secrets.HIDEN_COOKIE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -35,4 +35,13 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          python hidencloud_renew.py
+          python renew_browser.py
+
+      - name: Upload Screenshots (Debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renew-screenshots
+          path: screenshots/*.png
+          if-no-files-found: ignore
+          retention-days: 3
