@@ -292,7 +292,7 @@ def build_report(acct, counts, lines):
     head += (f"📊 执行统计: 成功 {counts.get('ok',0)} | "
              f"未到 {counts.get('skip',0)} | 失败 {counts.get('fail',0)} | 共 {total}\n\n")
     body = "\n".join(lines) if lines else "（无服务）"
-    return f"{head}{body}\n━━━━━━━━━━━━━━━━━━\n🤖 GitHub Actions 自动执行"
+    return f"{head}{body}\n━━━━━━━━━━━━━━━━━━\n🤖 GitHub Action/hidencloud-cookie"
 
 
 # ============ 页面结构 dump（排查用，只含名称/文本，不含 token） ============

@@ -76,7 +76,7 @@ jobs:
                  "请检查服务是否已到期、Cookie 是否失效。\n"
                  f"🕒 {now} (UTC+8)\n"
                  "━━━━━━━━━━━━━━━━━━\n"
-                 "🤖 GitHub Actions 自动执行")
+                 "🤖 GitHub Action/hidencloud-cookie")
           data = json.dumps({"chat_id": c, "text": msg, "parse_mode": "Markdown"}).encode()
           req = urllib.request.Request(f"https://api.telegram.org/bot{t}/sendMessage",
                                        data=data, headers={"Content-Type": "application/json"})
