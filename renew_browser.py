@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import base64
+import json
 import logging
 
 import requests
@@ -87,6 +88,66 @@ def update_github_secret(new_cookie):
         logger.info("GitHub Secret HIDEN_COOKIE 已更新" if r2.status_code in (201, 204) else f"更新失败: {r2.text}")
     except Exception as e:
         logger.error(f"更新 Secret 出错: {e}")
+
+
+# ============ WebDAV (InfiniCloud) 持久化 ============
+DAV_FILE = "hiden_cookie.json"
+DAV_TIMEOUT = 30
+
+
+def dav_config():
+    """未配置则返回 None，整个云端层自动禁用（fail-open）。"""
+    url = (os.environ.get("WEBDAV_URL") or "").strip()
+    user = (os.environ.get("WEBDAV_USER") or "").strip()
+    pwd = (os.environ.get("WEBDAV_PASS") or "").strip()
+    if not url or not user or not pwd:
+        return None
+    if not url.endswith("/"):
+        url += "/"
+    return url, user, pwd
+
+
+def dav_download():
+    """取云端最新 cookie；任何异常/未配置都返回空串，不影响主流程。"""
+    cfg = dav_config()
+    if not cfg:
+        logger.info("未配置 WEBDAV_URL/USER/PASS，跳过云端读取")
+        return ""
+    full, user, pwd = cfg[0] + DAV_FILE, cfg[1], cfg[2]
+    try:
+        r = requests.get(full, auth=(user, pwd), timeout=DAV_TIMEOUT)
+        if r.status_code == 200:
+            data = r.json()
+            ck = (data.get("cookie") or "").strip()
+            if ck:
+                logger.info(f"☁️ 云端 cookie 已获取 (更新于 {data.get('updated_at', '未知')})")
+                return ck
+            logger.warning("☁️ 云端文件无 cookie 字段")
+        elif r.status_code == 404:
+            logger.info("☁️ 云端暂无 cookie 文件（首次运行）")
+        else:
+            logger.warning(f"☁️ 云端下载失败，状态码 {r.status_code}")
+    except Exception as e:
+        logger.warning(f"☁️ 云端下载异常: {e}")
+    return ""
+
+
+def dav_upload(new_cookie):
+    if not new_cookie:
+        return
+    cfg = dav_config()
+    if not cfg:
+        return
+    full, user, pwd = cfg[0] + DAV_FILE, cfg[1], cfg[2]
+    body = json.dumps({"cookie": new_cookie, "updated_at": bj_time(),
+                       "source": "hidencloud-cookie"}, ensure_ascii=False)
+    try:
+        r = requests.put(full, data=body.encode("utf-8"), auth=(user, pwd),
+                         headers={"Content-Type": "application/json"}, timeout=DAV_TIMEOUT)
+        logger.info(f"☁️ 云端 cookie 已更新 ({r.status_code})" if r.status_code in (200, 201, 204)
+                    else f"☁️ 云端上传失败: {r.status_code}")
+    except Exception as e:
+        logger.warning(f"☁️ 云端上传异常: {e}")
 
 
 # ============ Telegram 通知 ============
@@ -462,8 +523,10 @@ def wait_renew_token(driver, sid, timeout=60):
 # ============ 主流程 ============
 def main():
     os.makedirs(PROFILE_DIR, exist_ok=True)
-    cookie = os.environ.get("HIDEN_COOKIE", "").strip()
+    secret_cookie = os.environ.get("HIDEN_COOKIE", "").strip()
     creds = os.environ.get("HIDENCLOUD", "").strip()  # 可选: email-----password
+    # 云端优先：WebDAV 里是上次运行刷新的最新 cookie，Secret 只作种子/兜底
+    cookie = dav_download() or secret_cookie
     if not cookie and not creds:
         logger.error("未提供 HIDEN_COOKIE 或 HIDENCLOUD")
         send_tg("❌ HidenCloud 续期失败: 缺少 HIDEN_COOKIE / HIDENCLOUD")
@@ -536,10 +599,11 @@ def main():
         if s:
             shots.append(s)
     finally:
-        # 导出最新 cookie 写回 Secret，保持登录态新鲜
+        # 导出最新 cookie 双写：GitHub Secret + WebDAV，任一失败不影响另一个
         new_cookie = export_cookie_str(driver)
-        if new_cookie and new_cookie != cookie:
+        if new_cookie and (new_cookie != cookie or new_cookie != secret_cookie):
             update_github_secret(new_cookie)
+            dav_upload(new_cookie)
         driver.quit()
 
     report = build_report(acct, counts, lines)

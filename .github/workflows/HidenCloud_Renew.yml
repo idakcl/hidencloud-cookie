@@ -50,6 +50,9 @@ jobs:
         if: steps.gate.outputs.should_run == 'true'
         env:
           HIDEN_COOKIE: ${{ secrets.HIDEN_COOKIE }}
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}
