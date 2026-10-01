@@ -204,6 +204,30 @@ def get_service_ids(driver):
     return out
 
 
+# ============ 页面结构 dump（排查用，只含名称/文本，不含 token） ============
+def dump_renew_ui(driver, sid):
+    try:
+        info = driver.execute_script("""
+            var sid = arguments[0];
+            function norm(t){return (t||'').replace(/\\s+/g,' ').trim();}
+            function attrs(el){return {tag:el.tagName.toLowerCase(), id:el.id||'', type:el.getAttribute('type')||'', oc:(el.getAttribute('onclick')||'').slice(0,60), text:norm(el.textContent).slice(0,40)};}
+            var btns = Array.from(document.querySelectorAll('button, a[href], input[type=submit]')).map(attrs).filter(function(b){return b.text||b.oc||b.id;});
+            return {
+              url: location.href,
+              has_renew_form: !!document.querySelector('#renew-form-'+sid),
+              has_renew_modal: !!document.querySelector('#renewService-'+sid),
+              has_turnstile: !!document.querySelector('.cf-turnstile'),
+              forms: Array.from(document.querySelectorAll('form')).map(function(f){return {id:f.id||'', action:(f.getAttribute('action')||'').slice(0,60)};}).slice(0,10),
+              buttons: btns.slice(0,25)
+            };
+        """, sid)
+        logger.info("UI-DUMP " + str(info))
+        return info
+    except Exception as e:
+        logger.info(f"UI-DUMP-ERR {e}")
+        return None
+
+
 # ============ 单个服务续期 ============
 def renew_one(driver, sid):
     """返回 (ok: bool, msg: str)。以「到期时间是否变晚」为准。"""
@@ -215,60 +239,69 @@ def renew_one(driver, sid):
 
     before_raw, before_std = get_due_date(driver)
 
-    # 定位 Renew 按钮
-    btn = None
-    for by, val in [
-        ("css selector", "button[onclick*='showRenewAlert']"),
-        ("xpath", "//button[contains(text(),'Renew')]"),
-    ]:
+    # 用 JS 稳健定位并点击 Renew 触发按钮（onclick showRenewAlert 或文本含 renew）
+    clicked = driver.execute_script("""
+        var sid = arguments[0];
+        function norm(t){return (t||'').replace(/\\s+/g,' ').trim();}
+        var els = Array.from(document.querySelectorAll('button, a[href], input[type=submit]'));
+        // 优先带 showRenewAlert 的
+        var el = els.find(function(e){return (e.getAttribute('onclick')||'').indexOf('showRenewAlert')>=0;});
+        if (!el) el = els.find(function(e){return /renew/i.test(norm(e.textContent)) || /renew/i.test(norm(e.value));});
+        if (el) { el.click(); return norm(el.textContent||el.value).slice(0,40); }
+        return null;
+    """, sid)
+
+    if not clicked:
+        dump_renew_ui(driver, sid)
+        return False, "未找到 Renew 按钮 (已 dump 结构)"
+    logger.info(f"点击续期触发按钮: {clicked!r}")
+    time.sleep(2)
+
+    # 解析限制参数（若未到期，站点会弹窗限制）
+    restriction = driver.execute_script("""
+        var e=document.querySelector('.fixed.inset-0 h3');return e?e.textContent.trim():'';
+    """)
+    if "Renewal Restricted" in (restriction or ""):
         try:
-            cand = driver.find_element(by, val)
-            if cand.is_displayed():
-                btn = cand
+            driver.execute_script("var b=Array.from(document.querySelectorAll('button')).find(function(x){return /ok|close/i.test(x.textContent);});if(b)b.click();")
+        except Exception:
+            pass
+        return True, "未到期 (站点限制弹窗, 视为正常)"
+
+    # 续期容器：模态框 #renewService-{sid} 或内联表单 #renew-form-{sid}
+    container = None
+    for sel in (f"div#renewService-{sid}", f"form#renew-form-{sid}", f"#renew-form-{sid}"):
+        try:
+            if driver.is_element_present(sel):
+                container = sel
                 break
         except Exception:
             continue
-    if not btn:
-        return False, "未找到 Renew 按钮"
+    if not container:
+        # 可能需要等待模态框出现
+        try:
+            driver.wait_for_element_visible(f"#renewService-{sid}", timeout=10)
+            container = f"#renewService-{sid}"
+        except Exception:
+            dump_renew_ui(driver, sid)
+            return False, "点击后未出现续期表单/模态框 (已 dump)"
 
-    # 解析限制参数（若未到期，站点会弹窗限制）
-    onclick = btn.get_attribute("onclick") or ""
-    m = re.search(r"showRenewAlert\((\d+),\s*(\d+),\s*(true|false)\)", onclick)
-    if m:
-        days_left, threshold = int(m.group(1)), int(m.group(2))
-        if days_left > threshold:
-            return True, f"未到期 (剩余 {days_left} 天, 需≤{threshold})"
-
-    btn.click()
-    time.sleep(2)
-
-    # 限制弹窗
-    try:
-        h3 = driver.execute_script("var e=document.querySelector('.fixed.inset-0 h3');return e?e.textContent.trim():'';")
-        if "Renewal Restricted" in (h3 or ""):
-            try:
-                driver.find_element("xpath", "//button[contains(text(),'OK')]").click()
-            except Exception:
-                pass
-            return True, "未到期 (站点限制, 视为正常)"
-    except Exception:
-        pass
-
-    # 续期模态框: 真实浏览器会自行完成模态内的 Turnstile
-    modal = f"div#renewService-{sid}"
-    try:
-        driver.wait_for_element_visible(modal, timeout=15)
-    except Exception:
-        return False, "续期模态框未出现"
-
-    # 尝试触发模态内 Turnstile 并等待 token（拿不到也继续，交给浏览器/最终比对判定）
-    if driver.is_element_present(f"{modal} .cf-turnstile"):
+    # 容器内若有 Turnstile，尝试交互并等待 token（拿不到也继续，交给浏览器/最终比对判定）
+    if driver.is_element_present(f"{container} .cf-turnstile") or driver.is_element_present(".cf-turnstile"):
         wait_renew_token(driver, sid, timeout=45)
 
-    try:
-        driver.find_element(by="css selector", value=f"{modal} button[type='submit']").click()
-    except Exception as e:
-        return False, f"点击 Create Invoice 失败: {e}"
+    submitted = driver.execute_script("""
+        var sel = arguments[0];
+        var root = document.querySelector(sel) || document;
+        var b = root.querySelector("button[type='submit'], input[type='submit']") ||
+                Array.from(root.querySelectorAll('button')).find(function(x){return /renew|invoice|submit|confirm/i.test(x.textContent);});
+        if (b) { b.click(); return (b.textContent||b.value||'submit').replace(/\\s+/g,' ').trim().slice(0,30); }
+        return null;
+    """, container)
+    if not submitted:
+        dump_renew_ui(driver, sid)
+        return False, "容器内未找到提交按钮 (已 dump)"
+    logger.info(f"提交续期表单: {submitted!r}")
     time.sleep(4)
     if not wait_pass_cf(driver):
         return False, "创建账单后 CF 挑战未通过"
