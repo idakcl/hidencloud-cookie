@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import base64
 from bs4 import BeautifulSoup
@@ -30,6 +31,7 @@ class HidenCloud:
         self.username = "Unknown"
         self.balance = "未知"
         self.updated_cookies = False
+        self.blocked_by_turnstile = False
         self.csrf_token = ""
         self.parse_and_set_cookies()
 
@@ -287,15 +289,31 @@ class HidenCloud:
                     days_match = re.search(r'expires in (\d+) days', alert_text)
                     days_info = f" (剩余 {days_match.group(1)} 天)" if days_match else ""
                     return True, f"未到期{days_info}"
+                if self.is_turnstile_error(alert_text):
+                    # 站点要求 cf-turnstile-response，纯 HTTP 无法伪造一次性 token
+                    self.blocked_by_turnstile = True
+                    return False, "被 Cloudflare Turnstile 拦截 (需浏览器方案)"
                 return False, f"申请失败: {alert_text}"
             
             if resp.status_code == 200 and "dash.hidencloud.com/service" in resp.url:
                 # 仍在管理页但没报错，可能是已经申请过或者其他情况
                 return True, "状态正常"
-                
+
+            if self.is_turnstile_error(resp.text):
+                self.blocked_by_turnstile = True
+                return False, "被 Cloudflare Turnstile 拦截 (需浏览器方案)"
+
             return False, f"续期请求失败: {resp.status_code}"
         except Exception as e:
             return False, f"续期异常: {e}"
+
+    @staticmethod
+    def is_turnstile_error(text):
+        """判断服务端返回是否为 Turnstile 校验缺失/失败"""
+        if not text:
+            return False
+        low = text.lower()
+        return ("cf-turnstile-response" in low) or ("turnstile" in low and "required" in low)
 
     def pay_unpaid_invoices(self, service_id):
         """检测并支付未支付订单"""
@@ -390,17 +408,17 @@ class HidenCloud:
             return False, f"支付异常: {e}"
 
     def run_task(self):
-        """运行完整续费任务"""
+        """运行完整续费任务，返回 True 表示全部成功"""
         if not self.check_login():
             logger.error("❌ Cookie 已失效或无法访问 Dashboard")
             self.send_tg_notification("❌ Cookie 已失效，请重新提取并更新 GitHub Secrets")
-            return
+            return False
 
         logger.info(f"账号 {self.username} 登录验证通过，开始执行任务...")
         service_ids = self.get_service_ids()
         if not service_ids:
             logger.warning("未找到任何活跃服务")
-            return
+            return True
 
         results = []
         success_count = 0
@@ -420,7 +438,9 @@ class HidenCloud:
 
         summary = f"📊 **执行统计**: 成功 `{success_count}` | 失败 `{fail_count}`\n\n"
         report = summary + "\n".join(results)
-        
+        if self.blocked_by_turnstile:
+            report += "\n\n⚠️ 站点续期接口已启用 Cloudflare Turnstile，纯 HTTP 方案无法通过，请改用浏览器版 workflow"
+
         logger.info(f"任务完成报告:\n{report}")
         self.send_tg_notification(report)
 
@@ -434,6 +454,8 @@ class HidenCloud:
             
             # 2. 更新本地 config.json (如果运行在本地)
             self.update_local_config(new_cookie_str)
+
+        return fail_count == 0
 
     def update_local_config(self, new_cookie):
         """同步更新本地 config.json"""
@@ -493,10 +515,10 @@ def main():
                         account_cookies.append(c_str)
         except Exception as e:
             logger.error(f"读取 config.json 失败: {e}")
-            return
+            sys.exit(1)
     else:
         logger.error("未找到 HIDEN_COOKIE 环境变量或 config.json")
-        return
+        sys.exit(1)
 
     # TG 配置
     tg_config = {
@@ -504,13 +526,19 @@ def main():
         "chat_id": os.environ.get("TG_CHAT_ID") or config.get("telegram", {}).get("chat_id")
     }
 
+    all_ok = True
     for cookie_str in account_cookies:
         if not cookie_str.strip(): continue
         try:
             bot = HidenCloud(cookie_str, tg_config)
-            bot.run_task()
+            if not bot.run_task():
+                all_ok = False
         except Exception as e:
             logger.error(f"处理账号时发生异常: {e}")
+            all_ok = False
+
+    # 业务失败必须让进程非 0 退出，否则 GitHub Actions 会误报绿色
+    sys.exit(0 if all_ok else 1)
 
 if __name__ == "__main__":
     main()
