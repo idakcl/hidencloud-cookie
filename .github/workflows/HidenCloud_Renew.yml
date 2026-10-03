@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -86,6 +86,21 @@ jobs:
           with urllib.request.urlopen(req, timeout=15) as r:
               print("TG:", r.status)
           PY
+
+      - name: 🕒 更新 time.txt 保活(每天仅一次)
+        if: always()
+        run: |
+          TODAY=$(TZ=Asia/Shanghai date +'%Y-%m-%d')
+          if [ -f time.txt ] && grep -q "^$TODAY" time.txt 2>/dev/null; then
+            echo "今日已更新,跳过"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          git add time.txt
+          git commit -m "⏱️ Auto keepalive by Github Actions $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
+          git push origin main
 
       - name: Upload Screenshots (Debug)
         if: always()
